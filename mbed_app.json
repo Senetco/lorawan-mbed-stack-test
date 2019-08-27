@@ -26,25 +26,28 @@
         "lora-busy":           { "value": "NC" },
         "lora-freq-sel":       { "value": "NC" },
         "lora-device-sel":     { "value": "NC" },
-        "lora-rx-pin":         { "value": "NC" }
+        "lora-rx-pin":         { "value": "NC" },
+        "lora-device-class":   { "value": "A" },
+        "tx-interval":         { "value": 60 },
+        "lora-uplink-port":    { "value": 1  },
+        "lora-config-port":    { "value": 1  }
     },
     "target_overrides": {
         "*": {
             "lora.version": 1,
+            "lora.device-eui":      "{0x00,0x25,0x0C,0x01,0x00,0x00,0x1A,0xF9}",
+            "lora.application-eui": "{0x00,0x25,0x0C,0x00,0x00,0x01,0x00,0x01}",
+            "lora.application-key": "{0xB4,0xDB,0x65,0x08,0xDC,0x44,0x8B,0xF9,0xA6,0xCB,0xBD,0xBC,0xA1,0x1F,0xD4,0x49}",
+            "lora.phy":             "US915",
             "lora.class-b": true,
             "lora.over-the-air-activation": true,
             "lora.ping-slot-periodicity": 4,
-            "lora.device-class": 0,
             "lora.duty-cycle-on-join": false,
             "platform.stdio-convert-newlines": true,
             "platform.stdio-baud-rate": 115200,
             "mbed-trace.enable": 1
         },
         "MOTE_L152RC":{
-            "lora.phy":             "US915",
-            "lora.device-eui":      "{0x00,0x25,0x0C,0x01,0x00,0x00,0x1A,0xF9}",
-            "lora.application-eui": "{0x00,0x25,0x0C,0x00,0x00,0x01,0x00,0x01}",
-            "lora.application-key": "{0xB4,0xDB,0x65,0x08,0xDC,0x44,0x8B,0xF9,0xA6,0xCB,0xBD,0xBC,0xA1,0x1F,0xD4,0x49}",
             "lora-radio":           "SX1272",
             "lora-spi-mosi":        "PB_15",
             "lora-spi-miso":        "PB_14",
@@ -66,10 +69,6 @@
             "lora-tcxo":            "NC"
         },
         "NUCLEO_L476RG": {
-            "lora.phy":             "US915",
-            "lora.device-eui":      "{0x00,0x25,0x0C,0x01,0x00,0x00,0x1A,0xF9}",
-            "lora.application-eui": "{0x00,0x25,0x0C,0x00,0x00,0x01,0x00,0x01}",
-            "lora.application-key": "{0xB4,0xDB,0x65,0x08,0xDC,0x44,0x8B,0xF9,0xA6,0xCB,0xBD,0xBC,0xA1,0x1F,0xD4,0x49}",
             "lora-radio":           "SX1276",
             "lora-spi-mosi":        "D11",
             "lora-spi-miso":        "D12",
