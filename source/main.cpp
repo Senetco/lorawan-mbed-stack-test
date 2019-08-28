@@ -27,6 +27,7 @@
 #define SET_PING_SLOT_PERIODICITY 5
 #define SEND_LINK_CHECK_REQ       6
 #define SEND_DEVICE_TIME_REQ      7
+#define RESET_NONVOL_CMD          254 
 #define SW_RESET_CMD              255 
 
 // NVStore Keys
@@ -352,6 +353,7 @@ void display_command_help()
     printf("Set Ping Slot Periodicity  %02x + [00 - 07]\n", SET_PING_SLOT_PERIODICITY);
     printf("Send LinkCheckReq          %02x\n", SEND_LINK_CHECK_REQ);
     printf("Send DeviceTimeReq         %02x\n", SEND_DEVICE_TIME_REQ);
+    printf("Reset Persistent Settings  %02x\n", RESET_NONVOL_CMD);
     printf("Device Reset               %02x\n", SW_RESET_CMD);
 
     printf("\nLoRaWAN Command FPort=%d\n", MBED_CONF_APP_LORA_CONFIG_PORT);
@@ -361,22 +363,18 @@ void display_command_help()
 void display_app_info()
 {
     printf("\n\n");
-    printf("Application : Senet Class A/B/C\n");
-    printf("LoRaWAN     : Mbed Native\n");
-    printf("Region      : %s\n",xstr(MBED_CONF_LORA_PHY));
-    printf("Version     : %d.%d.%d\n", MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
-    printf("Build       : %s %s\n\n", __DATE__, __TIME__);
-
-
+    printf("Application            : Device Class Test\n");
+    printf("LoRaWAN                : Mbed Native\n");
+    printf("Region                 : %s\n",xstr(MBED_CONF_LORA_PHY));
+    printf("Version                : %d.%d.%d\n", MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
+    printf("Build                  : %s %s\n\n", __DATE__, __TIME__);
     printf("DevEui%c               : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
         use_builtin_deveui?'*':' ',
         DEV_EUI[0], DEV_EUI[1], DEV_EUI[2], DEV_EUI[3], 
         DEV_EUI[4], DEV_EUI[5], DEV_EUI[6], DEV_EUI[7]);
-
     printf("AppEui                : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
            APP_EUI[0], APP_EUI[1], APP_EUI[2], APP_EUI[3], 
            APP_EUI[4], APP_EUI[5], APP_EUI[6], APP_EUI[7]);
-
     printf("AppKey                : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
            APP_KEY[0], APP_KEY[1], APP_KEY[2], APP_KEY[3], 
            APP_KEY[4], APP_KEY[5], APP_KEY[6], APP_KEY[7],
@@ -546,27 +544,52 @@ static void receive_command(uint8_t* buffer, int size)
         {
             printf("Send device time request\n");
             status = lorawan.add_device_time_request();
-            if(status != LORAWAN_STATUS_OK)
+            if(status == LORAWAN_STATUS_OK)
+            {
+                // Send now 
+                if(send_queued) 
+                {
+                    ev_queue.cancel(send_queued);
+                    send_queued = 0;
+                }
+                send_queued = ev_queue.call(&send_message);
+            }
+            else
+            {
                 printf("Configuration Error - EventCode = %d\n", status);
+            }
+
             break;
         }
         case SEND_LINK_CHECK_REQ:
         {
             printf("Send link check request\n");
             status = lorawan.add_link_check_request();
-            if(status != LORAWAN_STATUS_OK)
+            if(status == LORAWAN_STATUS_OK)
+            {
+                // Send now 
+                if(send_queued) 
+                {
+                    ev_queue.cancel(send_queued);
+                    send_queued = 0;
+                }
+                send_queued = ev_queue.call(&send_message);
+            }
+            else
+            {
                 printf("Configuration Error - EventCode = %d\n", status);
+            }
             break;
         }
         case SET_DEVICE_CLASS:
         {
             if((size == 2) && (buffer[1] <= 2))
             {
-                device_class_t rx_device_class = static_cast<device_class_t>(buffer[1]);
-                rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, buffer + 1);
-                printf("Set device class=%s. ",get_device_class_string(rx_device_class));
+                uint8_t rx_device_class = buffer[1];
+                rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, &rx_device_class);
+                printf("Set device class=%s. ",get_device_class_string(static_cast<device_class_t>(rx_device_class)));
                 print_return_code(rc, NVSTORE_SUCCESS);
-                set_device_class(rx_device_class);
+                set_device_class(static_cast<device_class_t>(rx_device_class));
             }
             break;
         }
@@ -575,6 +598,13 @@ static void receive_command(uint8_t* buffer, int size)
             printf("Software Reset\n");
             NVIC_SystemReset();
             break;
+        }
+        case RESET_NONVOL_CMD:
+        {
+            printf("Reset NVStore\n");
+            nvstore.reset();
+            break;
+
         }
         case SET_PING_SLOT_PERIODICITY:
         {
@@ -640,15 +670,29 @@ lorawan_status_t enable_beacon_acquisition()
     }
     else{ 
         beacon_found = false;
-        status = lorawan.enable_beacon_acquisition();
-        if (status != LORAWAN_STATUS_OK) {
-            printf("Beacon Acquisition Error - EventCode = %d\n", status);
-        } 
-        // Send device time request. Beacon acquisition is optimized when device time is synched
-        device_time_synched = false;
-        status = lorawan.add_device_time_request();
-        if (status != LORAWAN_STATUS_OK) {
-            printf("Add device time request Error - EventCode = %d", status);
+        if(device_time_synched)
+        {
+            status = lorawan.enable_beacon_acquisition();
+            if (status != LORAWAN_STATUS_OK) {
+                printf("Beacon Acquisition Error - EventCode = %d\n", status);
+            } 
+            fastTransmit = false;
+        }
+        else
+        {
+            // Send device time request. Beacon acquisition is optimized when device time is synched
+            status = lorawan.add_device_time_request();
+            if (status == LORAWAN_STATUS_OK) {
+                fastTransmit = true;          
+                if(send_queued) {
+                    ev_queue.cancel(send_queued);
+                    send_queued = 0;
+                }
+                send_queued = ev_queue.call(send_message);
+            }
+            else{
+                printf("Add device time request Error - EventCode = %d", status);
+            }
         }
     }
     return status;
@@ -703,7 +747,17 @@ lorawan_status_t set_device_class(device_class_t device_class)
             // Send ping slot configuration to the server
             if(!ping_slot_synched){
                 status = lorawan.add_ping_slot_info_request(ping_slot_periodicity);
-                if (status != LORAWAN_STATUS_OK) {
+                if (status == LORAWAN_STATUS_OK) 
+                {
+                    fastTransmit = true;          
+                    if(send_queued) 
+                    {
+                        ev_queue.cancel(send_queued);
+                        send_queued = 0;
+                    }
+                    send_queued = ev_queue.call(send_message);
+                }
+                else{
                     printf("Add ping slot info request Error - EventCode = %d", status);
                 }
             }
@@ -759,6 +813,8 @@ static void lora_event_handler(lorawan_event_t event)
             printf("Device Time received from Network Server\n");
             print_network_time();
             device_time_synched = true;
+            if(app_device_class == CLASS_B)
+                enable_beacon_acquisition();
             break;
         case PING_SLOT_INFO_SYNCHED:
             printf("Ping Slots = %u Synchronized with Network Server\n", 1 << (7 - PING_SLOT_PERIODICITY));
