@@ -1,4 +1,6 @@
 #include "mbed.h"
+#include "platform/CircularBuffer.h"
+#include "ctype.h"
 
 #include "mbed_trace.h"
 #include "mbed_events.h"
@@ -21,10 +23,10 @@
 #define SET_TX_INTERVAL           1
 #define SET_UPLINK_MSGTYPE        2
 #define SET_ADR_STATE             3
-#define SEND_LINK_CHECK_REQ       4
-#define SEND_DEVICE_TIME_REQ      5
-#define SET_DEVICE_CLASS          6
-#define SET_PING_SLOT_PERIODICITY 7
+#define SET_DEVICE_CLASS          4
+#define SET_PING_SLOT_PERIODICITY 5
+#define SEND_LINK_CHECK_REQ       6
+#define SEND_DEVICE_TIME_REQ      7
 #define SW_RESET_CMD              255 
 
 // NVStore Keys
@@ -56,9 +58,16 @@ static bool           class_b_on            = false;
 static bool           ping_slot_synched     = false;
 static bool           device_time_synched   = false;
 static bool           beacon_found          = false;
+static bool           use_builtin_deveui    = true;
 
 // Debug RX LED
-mbed::DigitalOut dbg_rx(MBED_CONF_APP_LORA_RX_PIN); 
+static mbed::DigitalOut dbg_rx(MBED_CONF_APP_LORA_RX_PIN); 
+static RawSerial pc(USBTX, USBRX);
+
+#define SERIAL_RX_BUF_SIZE 80
+static EventQueue serial_rx_queue;
+static CircularBuffer<char, SERIAL_RX_BUF_SIZE> serial_rx_buffer;
+static uint8_t  serial_command[SERIAL_RX_BUF_SIZE/2];
 
 typedef struct {
     uint16_t rx;
@@ -75,6 +84,9 @@ static uint8_t APP_KEY[] = MBED_CONF_LORA_APPLICATION_KEY;
 
 static void queue_next_send_message();
 static void print_received_beacon();
+static void receive_command(uint8_t* buffer, int size);
+static void display_command_help();
+static void display_app_info();
 
 // EventQueue is required to dispatch events around
 static EventQueue ev_queue;
@@ -106,6 +118,93 @@ const char* get_device_class_string(device_class_t device_class)
             return "C";
         default:
             return "?";
+    }
+}
+
+bool serial_rx_irq_enable = true;
+
+bool atoh(uint8_t &hex, char high_nibble, char low_nibble)
+{
+    hex = 0;
+
+    if(!isxdigit(high_nibble) || !isxdigit(low_nibble))
+        return false;
+
+    high_nibble = toupper(high_nibble);
+    low_nibble  = toupper(low_nibble);
+
+    hex = (high_nibble <= '9') ? (high_nibble - '0') * 16  :  (((high_nibble - 'A') + 10) << 4);
+    hex |= (low_nibble <= '9') ? (low_nibble - '0') : (low_nibble - 'A'  + 10);
+
+    return true;
+}
+
+void receive_serial_command()
+{
+    uint8_t  size = serial_rx_buffer.size();
+    bool     is_valid = true;
+
+    if(size == 1)
+    {
+        char c;
+        serial_rx_buffer.pop(c);
+        if(c == '?')
+        {
+            display_app_info();
+            display_command_help();
+        }
+    }
+    else
+    {
+        // size has to be a multiple of two
+        for(uint16_t i=0; i < size && is_valid; i+=2) 
+        {
+            char hn, ln;
+
+            if(serial_rx_buffer.pop(hn) && serial_rx_buffer.pop(ln))
+                is_valid = atoh(serial_command[i/2], hn, ln);
+            else
+                is_valid = false;
+        }
+
+        if(is_valid)
+            receive_command(serial_command, size/2);
+    }
+
+    if(!serial_rx_buffer.empty())
+        serial_rx_buffer.reset();
+
+
+    serial_rx_irq_enable = true;
+}
+
+void serial_rx_irq()
+{
+    if(!pc.readable())
+        return;
+
+    char c = pc.getc();
+
+    if(!serial_rx_irq_enable)
+        return;
+
+    if(!serial_rx_buffer.full())
+    {
+        // Ignore LF
+        if(c != '\n')
+        {
+            bool eol = c == '\r';
+
+            // Carriage Return is EOL
+            if(!eol)
+                serial_rx_buffer.push(c);
+
+            if(eol || serial_rx_buffer.full())
+            {
+                serial_rx_irq_enable = false;
+                ev_queue.call(receive_serial_command);
+            }
+        }
     }
 }
 
@@ -201,66 +300,108 @@ void restore_config()
     if(rc == NVSTORE_SUCCESS)
     {
         app_tx_interval = value;
-        printf("restore() - transmit interval=%lu.\n", app_tx_interval);
     }
 
     rc = nvstore.get(NVSTORE_ADR_ON_KEY, sizeof(value), &value, size);
     if(rc == NVSTORE_SUCCESS)
     {
-        printf("restore() - ADR=%lu.", value);
         if(value <= 1)
             adr_on = value; 
+        else
+            printf("restore() - invalid ADR=%lu\n", value);
     }
 
     rc = nvstore.get(NVSTORE_UPLINK_MSGTYPE_KEY, sizeof(value), &value, size); 
     if(rc == NVSTORE_SUCCESS)
     {
-        printf("restore() - uplink type=%lu.\n", value);
         if(value <= 1)
             tx_flags = (value == 0) ? MSG_UNCONFIRMED_FLAG :  MSG_CONFIRMED_FLAG;
+        else
+            printf("restore() - invalid uplink type=%lu\n", value);
     }
 
     rc = nvstore.get(NVSTORE_DEVICE_CLASS_KEY, sizeof(value), &value, size); 
     if(rc == NVSTORE_SUCCESS)
     {
-        printf("restore() - device class=%lu.\n", value);
         if(value <= 2)
             app_device_class = static_cast<device_class_t>(value);
+        else
+            printf("restore() - invalid device class=%lu\n", value);
     }
 
     rc = nvstore.get(NVSTORE_PING_SLOT_PERIODICITY, sizeof(value), &value, size); 
     if(rc == NVSTORE_SUCCESS)
     {
-        printf("restore() - ping slot periodicity=%lu.\n", value);
+        printf("restore() - ping slot periodicity=%lu\n", value);
         if(value <= PING_SLOT_PERIODICITY_MAX)
             ping_slot_periodicity = value; 
+        else
+            printf("restore() - invalid ping slot periodicity=%lu\n", value);
     }
+}
+
+void display_command_help()
+{
+    printf("\n\n");
+    printf("Command                   Format\n");
+    printf("------------------------- ------------------------------------\n");
+    printf("Set Tx Interval            %02x + [seconds encoded in 2 bytes (eg. 0x000F = 15 seconds)]\n", SET_TX_INTERVAL);
+    printf("Set Msg Type               %02x + [unconfirmed=00, confirmed=01]\n", SET_UPLINK_MSGTYPE);
+    printf("Set ADR                    %02x + [on=01, off=00]\n", SET_ADR_STATE);
+    printf("Set Device Class           %02x + [A=00, B=01, C=02]\n", SET_DEVICE_CLASS);
+    printf("Set Ping Slot Periodicity  %02x + [00 - 07]\n", SET_PING_SLOT_PERIODICITY);
+    printf("Send LinkCheckReq          %02x\n", SEND_LINK_CHECK_REQ);
+    printf("Send DeviceTimeReq         %02x\n", SEND_DEVICE_TIME_REQ);
+    printf("Device Reset               %02x\n", SW_RESET_CMD);
+
+    printf("\nLoRaWAN Command FPort=%d\n", MBED_CONF_APP_LORA_CONFIG_PORT);
+    printf("--------------------------------------------------------------\n\n");
 }
 
 void display_app_info()
 {
-    printf("\n\n---------------------------------------------\n");
+    printf("\n\n");
     printf("Application : Senet Class A/B/C\n");
     printf("LoRaWAN     : Mbed Native\n");
+    printf("Region      : %s\n",xstr(MBED_CONF_LORA_PHY));
     printf("Version     : %d.%d.%d\n", MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
-    printf("Buildk      : %s %s\n", __DATE__, __TIME__);
-    printf("---------------------------------------------\n\n");
+    printf("Build       : %s %s\n\n", __DATE__, __TIME__);
+
+
+    printf("DevEui%c               : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
+        use_builtin_deveui?'*':' ',
+        DEV_EUI[0], DEV_EUI[1], DEV_EUI[2], DEV_EUI[3], 
+        DEV_EUI[4], DEV_EUI[5], DEV_EUI[6], DEV_EUI[7]);
+
+    printf("AppEui                : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
+           APP_EUI[0], APP_EUI[1], APP_EUI[2], APP_EUI[3], 
+           APP_EUI[4], APP_EUI[5], APP_EUI[6], APP_EUI[7]);
+
+    printf("AppKey                : %02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x-%02x\n",
+           APP_KEY[0], APP_KEY[1], APP_KEY[2], APP_KEY[3], 
+           APP_KEY[4], APP_KEY[5], APP_KEY[6], APP_KEY[7],
+           APP_KEY[8], APP_KEY[9], APP_KEY[10], APP_KEY[11], 
+           APP_KEY[12], APP_KEY[13], APP_KEY[14], APP_KEY[15]); 
+
+    printf("Device Class          : %s\n", get_device_class_string(app_device_class));
+    printf("Tx Interval           : %lu\n", app_tx_interval);
+    printf("ADR                   : %u\n", adr_on);
+    printf("Msg Type              : %u\n", tx_flags);
+    printf("Ping Slot Periodicity : %u\n", ping_slot_periodicity);
+    printf("\n\n");
 }
 
 int main()
 {
+    pc.baud(115200);
+
+    // Serial Rx interrupt handler
+    pc.attach(mbed::callback(serial_rx_irq), Serial::RxIrq);
+
     memset(&app_data, 0, sizeof(app_data));
 
-    // Add delay for slow terminal connections
-    int wait_period = 10;
-    printf("Start in %d seconds\n", wait_period);
-    for(int i=wait_period; i > 0; i--)
-    {
-        wait(1);
-        printf(".");
-    }
-
-    display_app_info();
+    // Add delay for debugger connection 
+    wait(3);
 
     // Initialize device class
     if(strcmp(DEVICE_CLASS, "A") == 0)
@@ -275,28 +416,20 @@ int main()
         app_device_class = CLASS_A;
     }
 
-    // Restore NV Configuration 
+    // Restore persisted configuration 
     restore_config();
 
-    bool use_builtin_deveui = true;
     for(uint8_t i=0; i< 8; i++)
     {
         if(DEV_EUI[i] != 0)
         {
-            printf("deveui: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   DEV_EUI[0], DEV_EUI[1], DEV_EUI[2], DEV_EUI[3], DEV_EUI[4], DEV_EUI[5], DEV_EUI[6], DEV_EUI[7]);
             use_builtin_deveui = false;
             break;
         }
     }
 
     if(use_builtin_deveui)
-    {
-        if (get_built_in_dev_eui(DEV_EUI, sizeof(DEV_EUI)) == 0) {
-            printf("read built-in dev eui: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                   DEV_EUI[0], DEV_EUI[1], DEV_EUI[2], DEV_EUI[3], DEV_EUI[4], DEV_EUI[5], DEV_EUI[6], DEV_EUI[7]);
-        }
-    }
+        get_built_in_dev_eui(DEV_EUI, sizeof(DEV_EUI));
 
     if (DEV_EUI[0] == 0x0 && DEV_EUI[1] == 0x0 &&
         DEV_EUI[2] == 0x0 && DEV_EUI[3] == 0x0 &&
@@ -306,16 +439,8 @@ int main()
         return -1;
     }
 
-    printf("appeui: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-           APP_EUI[0], APP_EUI[1], APP_EUI[2], APP_EUI[3], APP_EUI[4], APP_EUI[5], APP_EUI[6], APP_EUI[7]);
-
-    printf("appkey: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
-           APP_KEY[0], APP_KEY[1], APP_KEY[2], APP_KEY[3], APP_KEY[4], APP_KEY[5], APP_KEY[6], APP_KEY[7],
-           APP_KEY[8], APP_KEY[9], APP_KEY[10], APP_KEY[11], APP_KEY[12], APP_KEY[13], APP_KEY[14], APP_KEY[15]); 
-
-    printf("device class: %s\n", get_device_class_string(app_device_class));
-
-    printf("region: %s\n",xstr(MBED_CONF_LORA_PHY));
+    display_app_info();
+    display_command_help();
 
     // Enable trace output for this demo, so we can see what the LoRaWAN stack does
     mbed_trace_init();
@@ -359,14 +484,131 @@ int main()
     return 0;
 }
 
+static void receive_command(uint8_t* buffer, int size)
+{
+    int rc;
+    lorawan_status_t status;
+
+    NVStore &nvstore = NVStore::get_instance();
+
+    switch(buffer[0])
+    {
+        case SET_TX_INTERVAL:
+        {
+            // Check size
+            if(size == 3)
+            {
+                app_tx_interval = (buffer[1]<<8 | buffer[2]);
+                rc = nvstore.set(NVSTORE_TX_INTERVAL_KEY, sizeof(app_tx_interval), &app_tx_interval);
+                printf("Set Transmit interval=%lu. ",app_tx_interval);
+                print_return_code(rc, NVSTORE_SUCCESS);
+
+                // Restart send with new interval
+                if(send_queued) 
+                {
+                     ev_queue.cancel(send_queued);
+                     send_queued = 0;
+                     queue_next_send_message();
+                }
+            }
+            break;
+        }
+        case SET_ADR_STATE:
+        {
+            if((size == 2) && (buffer[1] <= 1))
+            {
+                adr_on = buffer[1];
+                printf("Set ADR=%u. ",adr_on);
+                rc = nvstore.set(NVSTORE_ADR_ON_KEY, sizeof(adr_on), &adr_on);
+                print_return_code(rc, NVSTORE_SUCCESS);
+                if(adr_on)
+                    status = lorawan.enable_adaptive_datarate();
+                else
+                    status = lorawan.disable_adaptive_datarate();
+
+                if(status != LORAWAN_STATUS_OK)
+                    printf("Configuration Error - EventCode = %d\n", status);
+            }
+            break;
+        }
+        case SET_UPLINK_MSGTYPE:
+        {
+            if((size == 2) && (buffer[1] <= 1))
+            {
+                tx_flags = (buffer[1] == 0) ? MSG_UNCONFIRMED_FLAG : MSG_CONFIRMED_FLAG;
+                printf("Message type=%s. ",tx_flags == MSG_UNCONFIRMED_FLAG ?"unconfirmed":"confirmed");
+                rc = nvstore.set(NVSTORE_UPLINK_MSGTYPE_KEY, 1, buffer + 1);
+                print_return_code(rc, NVSTORE_SUCCESS);
+            }
+            break;
+        }
+        case SEND_DEVICE_TIME_REQ:
+        {
+            printf("Send device time request\n");
+            status = lorawan.add_device_time_request();
+            if(status != LORAWAN_STATUS_OK)
+                printf("Configuration Error - EventCode = %d\n", status);
+            break;
+        }
+        case SEND_LINK_CHECK_REQ:
+        {
+            printf("Send link check request\n");
+            status = lorawan.add_link_check_request();
+            if(status != LORAWAN_STATUS_OK)
+                printf("Configuration Error - EventCode = %d\n", status);
+            break;
+        }
+        case SET_DEVICE_CLASS:
+        {
+            if((size == 2) && (buffer[1] <= 2))
+            {
+                device_class_t rx_device_class = static_cast<device_class_t>(buffer[1]);
+                rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, buffer + 1);
+                printf("Set device class=%s. ",get_device_class_string(rx_device_class));
+                print_return_code(rc, NVSTORE_SUCCESS);
+                set_device_class(rx_device_class);
+            }
+            break;
+        }
+        case SW_RESET_CMD:
+        {
+            printf("Software Reset\n");
+            NVIC_SystemReset();
+            break;
+        }
+        case SET_PING_SLOT_PERIODICITY:
+        {
+            if((size == 2) && (buffer[1] <= PING_SLOT_PERIODICITY_MAX))
+            {
+                ping_slot_periodicity = buffer[1];
+                ping_slot_synched = false;
+
+                status = lorawan.add_ping_slot_info_request(ping_slot_periodicity);
+                if (status != LORAWAN_STATUS_OK) {
+                    printf("Add ping slot info request Error - EventCode = %d", status);
+                }
+                else{
+                    rc = nvstore.set(NVSTORE_PING_SLOT_PERIODICITY, 1, &ping_slot_periodicity); 
+                    printf("Set ping slot periodicity=%u. ",ping_slot_periodicity);
+                    print_return_code(rc, NVSTORE_SUCCESS);
+                }
+            }
+            break;
+        }
+        default:
+        {
+            printf("receive_cmd() - Unknown command=%u\n",buffer[0]);
+            break;
+        }
+    }
+}
+
 // This is called from RX_DONE, so whenever a message came in
 static void receive_message()
 {
     uint8_t rx_buffer[255] = { 0 };
     uint8_t port;
     int flags;
-    int rc;
-    lorawan_status_t status;
 
     int16_t retcode = lorawan.receive(rx_buffer, sizeof(rx_buffer), port, flags);
     if (retcode < 0) {
@@ -384,120 +626,9 @@ static void receive_message()
     }
     printf("\n");
 
-    if((port != MBED_CONF_APP_LORA_CONFIG_PORT) || (retcode < 1))
-        return;
+    if((port == MBED_CONF_APP_LORA_CONFIG_PORT) && (retcode >= 1))
+        receive_command(rx_buffer, retcode);
 
-    uint16_t cmd = rx_buffer[0];
-    NVStore &nvstore = NVStore::get_instance();
-
-    switch(cmd)
-    {
-        case SET_TX_INTERVAL:
-        {
-            // Check size
-            if(retcode == 3)
-            {
-                app_tx_interval = (rx_buffer[1]<<8 | rx_buffer[2]);
-                rc = nvstore.set(NVSTORE_TX_INTERVAL_KEY, sizeof(app_tx_interval), &app_tx_interval);
-                printf("receive() - Transmit interval=%lu. ",app_tx_interval);
-                print_return_code(rc, NVSTORE_SUCCESS);
-
-                // Restart send with new interval
-                if(send_queued) 
-                {
-                     ev_queue.cancel(send_queued);
-                     send_queued = 0;
-                     queue_next_send_message();
-                }
-            }
-            break;
-        }
-        case SET_ADR_STATE:
-        {
-            if((retcode == 2) && (rx_buffer[1] <= 1))
-            {
-                adr_on = rx_buffer[1];
-                printf("receive() - ADR=%u. ",adr_on);
-                rc = nvstore.set(NVSTORE_ADR_ON_KEY, sizeof(adr_on), &adr_on);
-                print_return_code(rc, NVSTORE_SUCCESS);
-                if(adr_on)
-                    status = lorawan.enable_adaptive_datarate();
-                else
-                    status = lorawan.disable_adaptive_datarate();
-
-                if(status != LORAWAN_STATUS_OK)
-                    printf("Configuration Error - EventCode = %d\n", status);
-            }
-            break;
-        }
-        case SET_UPLINK_MSGTYPE:
-        {
-            if((retcode == 2) && (rx_buffer[1] <= 1))
-            {
-                tx_flags = (rx_buffer[1] == 0) ? MSG_UNCONFIRMED_FLAG : MSG_CONFIRMED_FLAG;
-                printf("receive() - Message type=%s. ",tx_flags == MSG_UNCONFIRMED_FLAG ?"unconfirmed":"confirmed");
-                rc = nvstore.set(NVSTORE_UPLINK_MSGTYPE_KEY, 1, rx_buffer + 1);
-                print_return_code(rc, NVSTORE_SUCCESS);
-            }
-            break;
-        }
-        case SEND_DEVICE_TIME_REQ:
-        {
-            printf("receive() - Send device time request\n");
-            status = lorawan.add_device_time_request();
-            if(status != LORAWAN_STATUS_OK)
-                printf("Configuration Error - EventCode = %d\n", status);
-            break;
-        }
-        case SEND_LINK_CHECK_REQ:
-        {
-            printf("receive() - Send link check request\n");
-            status = lorawan.add_link_check_request();
-            if(status != LORAWAN_STATUS_OK)
-                printf("Configuration Error - EventCode = %d\n", status);
-            break;
-        }
-        case SET_DEVICE_CLASS:
-        {
-            if((retcode == 2) && (rx_buffer[1] <= 2))
-            {
-                device_class_t rx_device_class = static_cast<device_class_t>(rx_buffer[1]);
-                rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, rx_buffer + 1);
-                printf("receive() - Set device class=%s. ",get_device_class_string(rx_device_class));
-                print_return_code(rc, NVSTORE_SUCCESS);
-                set_device_class(rx_device_class);
-            }
-            break;
-        }
-        case SW_RESET_CMD:
-        {
-            printf("receive() - Software Reset\n");
-            NVIC_SystemReset();
-            break;
-        }
-        case SET_PING_SLOT_PERIODICITY:
-        {
-            if((retcode == 2) && (rx_buffer[1] <= PING_SLOT_PERIODICITY_MAX))
-            {
-                status = lorawan.add_ping_slot_info_request(PING_SLOT_PERIODICITY);
-                if (status != LORAWAN_STATUS_OK) {
-                    printf("Add ping slot info request Error - EventCode = %d", status);
-                }
-                else{
-                    ping_slot_synched = false;
-                    rc = nvstore.set(NVSTORE_PING_SLOT_PERIODICITY, 1, rx_buffer+1); 
-                    printf("receive() - Set ping slot periodicity=%u. ",rx_buffer[1]);
-                    print_return_code(rc, NVSTORE_SUCCESS);
-                }
-            }
-            break;
-        }
-        default:
-        {
-            printf("receive() - Unknown command=%u\n",cmd);
-            break;
-        }
-    }
 }
 
 lorawan_status_t enable_beacon_acquisition()
@@ -571,7 +702,7 @@ lorawan_status_t set_device_class(device_class_t device_class)
         case CLASS_B:
             // Send ping slot configuration to the server
             if(!ping_slot_synched){
-                status = lorawan.add_ping_slot_info_request(PING_SLOT_PERIODICITY);
+                status = lorawan.add_ping_slot_info_request(ping_slot_periodicity);
                 if (status != LORAWAN_STATUS_OK) {
                     printf("Add ping slot info request Error - EventCode = %d", status);
                 }
