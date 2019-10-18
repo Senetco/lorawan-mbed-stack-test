@@ -17,7 +17,7 @@
 // Version information
 #define MAJOR_VERSION 1
 #define MINOR_VERSION 1
-#define PATCH_VERSION 1
+#define PATCH_VERSION 2
 
 // Commands
 #define SET_TX_INTERVAL           1
@@ -56,6 +56,7 @@ static device_class_t app_device_class      = CLASS_A;
 static int            send_queued           = 0;
 static bool           fastTransmit          = false;
 static bool           class_b_on            = false;
+static bool           beacon_acq_enabled    = false;
 static bool           ping_slot_synched     = false;
 static bool           device_time_synched   = false;
 static bool           beacon_found          = false;
@@ -381,11 +382,18 @@ void display_app_info()
            APP_KEY[8], APP_KEY[9], APP_KEY[10], APP_KEY[11], 
            APP_KEY[12], APP_KEY[13], APP_KEY[14], APP_KEY[15]); 
 
-    printf("Device Class          : %s\n", get_device_class_string(app_device_class));
+    printf("Device Class          : %s", get_device_class_string(app_device_class));
+    if(app_device_class == CLASS_B && !class_b_on){
+        printf(" pending(BeaconAcq=%s, PingSlotAns=%s, DeviceTimeAns=%s)", 
+            beacon_acq_enabled?"on":"off", ping_slot_synched?"yes":"no", device_time_synched?"yes":"no");
+    }
+    printf("\n");
+
+    printf("Beacon Acquisition    : %s\n", beacon_acq_enabled ? "on": "off");
     printf("Tx Interval           : %lu\n", app_tx_interval);
     printf("ADR                   : %u\n", adr_on);
     printf("Msg Type              : %u\n", tx_flags);
-    printf("Ping Slot Periodicity : %u\n", ping_slot_periodicity);
+    printf("Ping Slot Periodicity : %u\n", ping_slot_periodicity); 
     printf("\n\n");
 }
 
@@ -587,9 +595,9 @@ static void receive_command(uint8_t* buffer, int size)
             {
                 uint8_t rx_device_class = buffer[1];
                 rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, &rx_device_class);
-                printf("Set device class=%s. ",get_device_class_string(static_cast<device_class_t>(rx_device_class)));
-                print_return_code(rc, NVSTORE_SUCCESS);
-                set_device_class(static_cast<device_class_t>(rx_device_class));
+                printf("Configure device class=%s. ",get_device_class_string(static_cast<device_class_t>(rx_device_class)));
+                rc = set_device_class(static_cast<device_class_t>(rx_device_class));
+                print_return_code(rc, LORAWAN_STATUS_OK);
             }
             break;
         }
@@ -676,6 +684,10 @@ lorawan_status_t enable_beacon_acquisition()
             if (status != LORAWAN_STATUS_OK) {
                 printf("Beacon Acquisition Error - EventCode = %d\n", status);
             } 
+            else{
+                printf("Beacon acquistion enabled\n");
+                beacon_acq_enabled = true;
+            }
             fastTransmit = false;
         }
         else
@@ -691,7 +703,7 @@ lorawan_status_t enable_beacon_acquisition()
                 send_queued = ev_queue.call(send_message);
             }
             else{
-                printf("Add device time request Error - EventCode = %d", status);
+                printf("Add device time request Error - EventCode = %d\n", status);
             }
         }
     }
@@ -703,7 +715,7 @@ void switch_to_class_b(void)
     lorawan_status_t status = LORAWAN_STATUS_NO_OP;
 
     if(app_device_class != CLASS_B) {
-        printf("Switch To Device Class B: Configured device class=%s\n", get_device_class_string(app_device_class)); 
+        printf("switch to class B: configured device class=%s\n", get_device_class_string(app_device_class)); 
     }
     else if(!class_b_on && beacon_found && ping_slot_synched){
         status = lorawan.set_device_class(CLASS_B);
@@ -742,6 +754,12 @@ lorawan_status_t set_device_class(device_class_t device_class)
         case CLASS_A:
         case CLASS_C:
             status = lorawan.set_device_class(device_class);
+            device_time_synched = false;
+            class_b_on = false;
+            if(beacon_acq_enabled) {
+                lorawan.disable_beacon_acquisition();
+                beacon_acq_enabled = false;
+            }
             break;
         case CLASS_B:
             // Send ping slot configuration to the server
@@ -767,8 +785,10 @@ lorawan_status_t set_device_class(device_class_t device_class)
             }
             break;
     }
-    if(status == LORAWAN_STATUS_OK)
+
+    if(status == LORAWAN_STATUS_OK){
         app_device_class = device_class;
+    }
 
     return status;
 }

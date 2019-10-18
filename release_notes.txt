@@ -1,0 +1,13 @@
+Release Notes
+
+--------------------   
+1.1.2 October 18, 2019
+- Fix device class switch from b => a/c not disabling 
+  beacon acquistion, which could result in switch back to class b 
+- Fix processing of received join accept not for the device 
+ 
+
+1.1.1
+- Initial release
+
+
