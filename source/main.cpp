@@ -8,7 +8,10 @@
 #include "dev_eui_helper.h"
 #include "LoRaWANInterface.h"
 #include "platform/Callback.h"
-#include "nvstore.h"
+#include "KVStore.h"
+#include "kvstore_global_api.h"
+
+#define mbed_err_code(res) MBED_GET_ERROR_CODE(res)
 
 // Macro name to string 
 #define xstr(a) str(a)
@@ -31,12 +34,13 @@
 #define SW_RESET_CMD              255 
 
 // NVStore Keys
-#define NVSTORE_TX_INTERVAL_KEY       1
-#define NVSTORE_UPLINK_MSGTYPE_KEY    2
-#define NVSTORE_ADR_ON_KEY            3 
-#define NVSTORE_DEVICE_CLASS_KEY      4 
-#define NVSTORE_PING_SLOT_PERIODICITY 5 
-#define DEVICE_CLASS xstr(MBED_CONF_APP_LORA_DEVICE_CLASS)
+static const char* NVSTORE_TX_INTERVAL_KEY         = "/kv/txinterval";
+static const char* NVSTORE_UPLINK_MSGTYPE_KEY      = "/kv/uplinktype"; 
+static const char*  NVSTORE_ADR_ON_KEY             = "/kv/adron" ;
+static const char*  NVSTORE_DEVICE_CLASS_KEY       = "/kv/devclass"; 
+static const char*  NVSTORE_PING_SLOT_PERIODICITY  = "/kv/pingslotperiod";
+
+#define  DEVICE_CLASS xstr(MBED_CONF_APP_LORA_DEVICE_CLASS)
 
 // Network time display interval 
 #define PRINT_NETWORK_TIME_INTERVAL 60000
@@ -265,7 +269,7 @@ void print_network_time(){
 
 void print_return_code(int rc, int expected_rc)
 {
-    printf("Return code is %d ", rc);
+    printf("Return code is %d ", mbed_err_code(rc));
     if(rc == expected_rc)
         printf("(as expected).\n");
     else
@@ -277,35 +281,16 @@ void restore_config()
     uint32_t value;
     uint16_t size;
     int rc;
+    size_t actual_size;
 
-    NVStore &nvstore = NVStore::get_instance();
-    rc = nvstore.init();
-    printf("Init NVStore. ");
-    print_return_code(rc, NVSTORE_SUCCESS);
-
-    #if 0
-    // Show NVStore size, maximum number of keys and area addresses and sizes
-    printf("NVStore size is %d.\n", nvstore.size());
-    printf("NVStore max number of keys is %d (out of %d possible ones in this flash configuration).\n",
-            nvstore.get_max_keys(), nvstore.get_max_possible_keys());
-
-    printf("NVStore areas:\n");
-    for (uint8_t area = 0; area < NVSTORE_NUM_AREAS; area++) {
-        uint32_t area_address;
-        size_t area_size;
-        nvstore.get_area_params(area, area_address, area_size);
-        printf("Area %d: address 0x%08lx, size %d (0x%x).\n", area, area_address, area_size, area_size);
-    }
-    #endif
-
-    rc = nvstore.get(NVSTORE_TX_INTERVAL_KEY, sizeof(value), &value, size);
-    if(rc == NVSTORE_SUCCESS)
+    rc = kv_get(NVSTORE_TX_INTERVAL_KEY, &value, sizeof(value), &actual_size);
+    if(rc == MBED_SUCCESS)
     {
         app_tx_interval = value;
     }
 
-    rc = nvstore.get(NVSTORE_ADR_ON_KEY, sizeof(value), &value, size);
-    if(rc == NVSTORE_SUCCESS)
+    rc = kv_get(NVSTORE_ADR_ON_KEY, &value, sizeof(value), &actual_size);
+    if(rc == MBED_SUCCESS)
     {
         if(value <= 1)
             adr_on = value; 
@@ -313,8 +298,8 @@ void restore_config()
             printf("restore() - invalid ADR=%lu\n", value);
     }
 
-    rc = nvstore.get(NVSTORE_UPLINK_MSGTYPE_KEY, sizeof(value), &value, size); 
-    if(rc == NVSTORE_SUCCESS)
+    rc = kv_get(NVSTORE_UPLINK_MSGTYPE_KEY, &value, sizeof(value), &actual_size);
+    if(rc == MBED_SUCCESS)
     {
         if(value <= 1)
             tx_flags = (value == 0) ? MSG_UNCONFIRMED_FLAG :  MSG_CONFIRMED_FLAG;
@@ -322,8 +307,8 @@ void restore_config()
             printf("restore() - invalid uplink type=%lu\n", value);
     }
 
-    rc = nvstore.get(NVSTORE_DEVICE_CLASS_KEY, sizeof(value), &value, size); 
-    if(rc == NVSTORE_SUCCESS)
+    rc = kv_get(NVSTORE_DEVICE_CLASS_KEY, &value, sizeof(value), &actual_size);
+    if(rc == MBED_SUCCESS)
     {
         if(value <= 2)
             app_device_class = static_cast<device_class_t>(value);
@@ -331,8 +316,8 @@ void restore_config()
             printf("restore() - invalid device class=%lu\n", value);
     }
 
-    rc = nvstore.get(NVSTORE_PING_SLOT_PERIODICITY, sizeof(value), &value, size); 
-    if(rc == NVSTORE_SUCCESS)
+    rc = kv_get(NVSTORE_PING_SLOT_PERIODICITY, &value, sizeof(value), &actual_size);
+    if(rc == MBED_SUCCESS)
     {
         printf("restore() - ping slot periodicity=%lu\n", value);
         if(value <= PING_SLOT_PERIODICITY_MAX)
@@ -495,8 +480,6 @@ static void receive_command(uint8_t* buffer, int size)
     int rc;
     lorawan_status_t status;
 
-    NVStore &nvstore = NVStore::get_instance();
-
     switch(buffer[0])
     {
         case SET_TX_INTERVAL:
@@ -505,9 +488,9 @@ static void receive_command(uint8_t* buffer, int size)
             if(size == 3)
             {
                 app_tx_interval = (buffer[1]<<8 | buffer[2]);
-                rc = nvstore.set(NVSTORE_TX_INTERVAL_KEY, sizeof(app_tx_interval), &app_tx_interval);
+                rc = kv_set(NVSTORE_TX_INTERVAL_KEY, &app_tx_interval, sizeof(app_tx_interval), 0);
                 printf("Set Transmit interval=%lu. ",app_tx_interval);
-                print_return_code(rc, NVSTORE_SUCCESS);
+                print_return_code(rc, MBED_SUCCESS);
 
                 // Restart send with new interval
                 if(send_queued) 
@@ -525,8 +508,9 @@ static void receive_command(uint8_t* buffer, int size)
             {
                 adr_on = buffer[1];
                 printf("Set ADR=%u. ",adr_on);
-                rc = nvstore.set(NVSTORE_ADR_ON_KEY, sizeof(adr_on), &adr_on);
-                print_return_code(rc, NVSTORE_SUCCESS);
+
+                rc = kv_set(NVSTORE_ADR_ON_KEY, &adr_on, sizeof(adr_on), 0);
+                print_return_code(rc, MBED_SUCCESS);
                 if(adr_on)
                     status = lorawan.enable_adaptive_datarate();
                 else
@@ -543,8 +527,9 @@ static void receive_command(uint8_t* buffer, int size)
             {
                 tx_flags = (buffer[1] == 0) ? MSG_UNCONFIRMED_FLAG : MSG_CONFIRMED_FLAG;
                 printf("Message type=%s. ",tx_flags == MSG_UNCONFIRMED_FLAG ?"unconfirmed":"confirmed");
-                rc = nvstore.set(NVSTORE_UPLINK_MSGTYPE_KEY, 1, buffer + 1);
-                print_return_code(rc, NVSTORE_SUCCESS);
+
+                rc = kv_set(NVSTORE_UPLINK_MSGTYPE_KEY, buffer +1 , 1, 0);
+                print_return_code(rc, MBED_SUCCESS);
             }
             break;
         }
@@ -594,7 +579,7 @@ static void receive_command(uint8_t* buffer, int size)
             if((size == 2) && (buffer[1] <= 2))
             {
                 uint8_t rx_device_class = buffer[1];
-                rc = nvstore.set(NVSTORE_DEVICE_CLASS_KEY, 1, &rx_device_class);
+                rc = kv_set(NVSTORE_DEVICE_CLASS_KEY, &rx_device_class, 1, 0);
                 printf("Configure device class=%s. ",get_device_class_string(static_cast<device_class_t>(rx_device_class)));
                 rc = set_device_class(static_cast<device_class_t>(rx_device_class));
                 print_return_code(rc, LORAWAN_STATUS_OK);
@@ -610,7 +595,8 @@ static void receive_command(uint8_t* buffer, int size)
         case RESET_NONVOL_CMD:
         {
             printf("Reset NVStore\n");
-            nvstore.reset();
+            kv_reset("/kv");
+
             break;
 
         }
@@ -626,9 +612,9 @@ static void receive_command(uint8_t* buffer, int size)
                     printf("Add ping slot info request Error - EventCode = %d", status);
                 }
                 else{
-                    rc = nvstore.set(NVSTORE_PING_SLOT_PERIODICITY, 1, &ping_slot_periodicity); 
+                    rc = kv_set(NVSTORE_PING_SLOT_PERIODICITY, &ping_slot_periodicity, 1, 0); 
                     printf("Set ping slot periodicity=%u. ",ping_slot_periodicity);
-                    print_return_code(rc, NVSTORE_SUCCESS);
+                    print_return_code(rc, MBED_SUCCESS);
                 }
             }
             break;
