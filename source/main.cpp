@@ -19,8 +19,8 @@
 
 // Version information
 #define MAJOR_VERSION 1
-#define MINOR_VERSION 1
-#define PATCH_VERSION 2
+#define MINOR_VERSION 2
+#define PATCH_VERSION 1
 
 // Commands
 #define SET_TX_INTERVAL           1
@@ -349,7 +349,7 @@ void display_command_help()
 void display_app_info()
 {
     printf("\n\n");
-    printf("Application            : Device Class Test\n");
+    printf("Application            : LoRaWAN Test\n");
     printf("LoRaWAN                : Mbed Native\n");
     printf("Region                 : %s\n",xstr(MBED_CONF_LORA_PHY));
     printf("Version                : %d.%d.%d\n", MAJOR_VERSION, MINOR_VERSION, PATCH_VERSION);
