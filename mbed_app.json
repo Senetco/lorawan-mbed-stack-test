@@ -25,7 +25,7 @@
         "lora-tcxo":           { "value": "NC" },
         "lora-busy":           { "value": "NC" },
         "lora-freq-sel":       { "value": "NC" },
-        "lora-device-sel":     { "value": "NC" },
+        "lora-dev-sel":        { "value": "NC" },
         "lora-rx-pin":         { "value": "NC" },
         "lora-device-class":   { "value": "A" },
         "tx-interval":         { "value": 60 },
@@ -82,6 +82,21 @@
             "lora-dio5":            "D9",
             "lora-txctl":           "A4",
             "lora-rxctl":           "A4"
+        },
+
+        "NUCLEO_L073RZ": {
+            "lora-radio":           "SX126X",
+            "lora-spi-mosi":        "D11",
+            "lora-spi-miso":        "D12",
+            "lora-spi-sclk":        "D13",
+            "lora-cs":              "D7",
+            "lora-reset":           "A0",
+            "lora-dio1":            "D5",
+            "lora-busy":            "D3",
+            "lora-freq-sel":        "A1",
+            "lora-dev-sel":         "A2",
+            "lora-tcxo":            "A3",
+            "lora-ant-switch":      "D8"
         }
     }
 }
