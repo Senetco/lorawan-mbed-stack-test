@@ -426,7 +426,10 @@ int main()
         DEV_EUI[2] == 0x0 && DEV_EUI[3] == 0x0 &&
         DEV_EUI[4] == 0x0 && DEV_EUI[5] == 0x0 &&
         DEV_EUI[6] == 0x0 && DEV_EUI[7] == 0x0) {
-        printf("Set your LoRaWAN credentials first!\n");
+        while(true) {
+            ThisThread::sleep_for(3000);
+            printf("Set your LoRaWAN credentials first!\n");
+        }
         return -1;
     }
 
@@ -437,8 +440,10 @@ int main()
     mbed_trace_init();
 
     if (lorawan.initialize(&ev_queue) != LORAWAN_STATUS_OK) {
-        printf("LoRa initialization failed!\n");
-        return -1;
+        while(true) {
+            ThisThread::sleep_for(3000);
+            printf("LoRa initialization failed!\n");
+        }
     }
 
     // prepare application callbacks
@@ -458,7 +463,10 @@ int main()
     if (retcode == LORAWAN_STATUS_OK ||
         retcode == LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
     } else {
-        printf("Connection error, code = %d\n", retcode);
+        while(true) {
+            ThisThread::sleep_for(3000);
+            printf("Connection error, code = %d\n", retcode);
+        }
         return -1;
     }
 

@@ -1,7 +1,7 @@
-.PHONY: mote, l073
+.PHONY: nmote, nucleo_l073
 
-mote:
+namote:
 	mbed compile -m MOTE_L152RC -t GCC_ARM --profile ./mbed-os/tools/profiles/release.json
 
-l073:
+nucleo_l073:
 	mbed compile -m NUCLEO_L073RZ -t GCC_ARM --profile ./mbed-os/tools/profiles/release.json
