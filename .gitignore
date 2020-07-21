@@ -1,3 +1,5 @@
 BUILD/
 mbed-os/
 mbed-semtech-lora-rf-drivers/
+.mbed
+mbed_settings.py
